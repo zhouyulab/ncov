@@ -1,0 +1,316 @@
+---
+title: "View DEGs in interesing KEGG pathways or GO-term groups"
+output: html_notebook
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(ComplexHeatmap)
+library(circlize)
+library(DelayedArray)
+```
+
+```{r}
+projs <- c("balf", "pbmc")
+pathway_base <- "data/KEGG"
+fCK <- "data/CK.tsv"
+```
+
+## GO-term Cytokine
+
+```{r}
+readCK <- function(fCK) {
+  dfCK <- read_delim(fCK, "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE)
+  CK <- unique(as.character(dfCK$X2))
+  return(CK)
+}
+
+showCK <- function(proj, fCK) {
+  fDE <- file.path(proj, "DE.tsv")
+  stopifnot(file.exists(fDE))
+  f_out <- file.path(proj, "KEGG")
+  if (!dir.exists(f_out)) dir.create(f_out)
+  
+  DE <- read_delim(fDE, "\t", escape_double = FALSE, trim_ws = TRUE)
+  CK <- readCK(fCK)
+  ck_df <- DE[DE$Name %in% CK, ]
+  sample_indx <- grep("CPM-", names(ck_df))
+  expr_mat <- as.matrix(ck_df[, sample_indx])
+  rownames(expr_mat) <- ck_df$Name
+  colnames(expr_mat) <- sub("CPM-", "", colnames(expr_mat))
+  if (proj == "balf") {
+    expr_mat <- expr_mat[, c("Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")]
+  }
+  norm_expr_mat <- t(scale(t(expr_mat)))
+  
+  is_DE <- ck_df$Tag %in% c("Up", "Down")
+  col_li <- c("white", "white")
+  names(col_li) <- c("*", "")
+  DE_label <- factor(is_DE, levels = c(TRUE, FALSE), labels = c("*", ""))
+  DE_label <- as.character(DE_label)
+  names(DE_label) <- ck_df$Gid
+  ha <- rowAnnotation(
+    DE = anno_simple(
+      DE_label,
+      col = col_li,
+      pch = DE_label,
+      na_col = "white"
+    ),
+    show_annotation_name = FALSE,
+    width = unit(0.2, "cm")
+  )
+  
+  ht <- Heatmap(
+    norm_expr_mat,
+    name = "Scaled Expr.",
+    right_annotation = ha,
+    cluster_columns = FALSE,
+    width = ncol(norm_expr_mat),
+    row_names_gp = gpar(fontsize = 5),
+    column_names_gp = gpar(fontsize = 5),
+    row_dend_width = unit(5, "mm"),
+    column_dend_height = unit(5, "mm"),
+    column_title = "GO:0005125 ~ cytokine activity",
+    column_title_gp = gpar(fontsize = 5),
+    heatmap_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 5),
+      grid_width = unit(2, "mm"),
+      grid_height = unit(2, "mm")
+    )
+  )
+  
+  inche_cm <- 2.54
+  pdf(
+    file.path(f_out, "CK.pdf"),
+    width = (3.5 + 0.3 * ncol(norm_expr_mat)) / inche_cm,
+    height = (1 + 0.2 * nrow(norm_expr_mat)) / inche_cm
+  )
+  print(ht)
+  dev.off()
+}
+
+lapply(projs, function(proj) showCK(proj, fCK))
+```
+
+
+### Interesting pathways
+```{r}
+pathway_li <- c(
+  "04060", "04061", "04064", "04151", "04630", "04668",
+  "04010", "04140", "04210", "04640", "04610",
+  "04611", "04620", "04621", "04622",
+  "04623", "04625", "04650", "04612", "04660",
+  "04658", "04659", "04657", "04662", "04664",
+  "04666", "04670", "04672", "04062"
+)
+pathway_name <- c(
+  "Cytokine-cytokine receptor interaction", 
+  "Viral protein interaction with cytokine and cytokine receptor", 
+  "NF-kappa B signaling pathway", 
+  "PI3K-Akt signaling pathway", 
+  "Jak-STAT signaling pathway", 
+  "TNF signaling pathway",
+  "MAPK signaling pathway",
+  "Autophagy - animal",
+  "Apoptosis",
+  "Hematopoietic cell lineage",
+  "Complement and coagulation cascades",
+  "Platelet activation",
+  "Toll-like receptor signaling pathway",
+  "NOD-like receptor signaling pathway",
+  "RIG-I-like receptor signaling pathway",
+  "Cytosolic DNA-sensing pathway",
+  "C-type lectin receptor signaling pathway",
+  "Natural killer cell mediated cytotoxicity",
+  "Antigen processing and presentation",
+  "T cell receptor signaling pathway",
+  "Th1 and Th2 cell differentiation",
+  "Th17 cell differentiation",
+  "IL-17 signaling pathway",
+  "B cell receptor signaling pathway",
+  "Fc epsilon RI signaling pathway",
+  "Fc gamma R-mediated phagocytosis",
+  "Leukocyte transendothelial migration",
+  "Intestinal immune network for IgA production",
+  "Chemokine signaling pathway"
+)
+pathway_len <- length(pathway_li)
+cat(pathway_len, length(pathway_name), "\n")
+stopifnot(pathway_len == length(pathway_name))
+pwyli <- as.list(pathway_name)
+names(pwyli) <- pathway_li
+pwyli
+```
+
+## View all genes in each pathway, marking * on DEGs
+
+```{r}
+read_pathway_gene <- function(pathwayid) {
+  fpathway <- file.path(pathway_base, sprintf("%s.txt", pathwayid))
+  stopifnot(file.exists(fpathway))
+  p_df <- read_delim(fpathway, "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE)
+  names(p_df) <- "Name"
+  return(p_df)
+}
+
+showPathway <- function(proj, pathwayid, pathway) {
+  fDE <- file.path(proj, "DE.tsv")
+  stopifnot(file.exists(fDE))
+  f_out <- file.path(proj, "KEGG")
+  if (!dir.exists(f_out)) dir.create(f_out)
+  DE <- read_delim(fDE, "\t", escape_double = FALSE, trim_ws = TRUE)
+  
+  p_df <- read_pathway_gene(pathwayid)
+  p_df <- inner_join(p_df, DE, by="Name")
+  sample_indx <- grep("CPM-", names(p_df))
+  expr_mat <- as.matrix(p_df[, sample_indx])
+  rownames(expr_mat) <- p_df$Name
+  colnames(expr_mat) <- sub("CPM-", "", colnames(expr_mat))
+  if (proj == "balf") {
+    expr_mat <- expr_mat[, c("Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")]
+  }
+  norm_expr_mat <- t(scale(t(expr_mat)))
+  
+  is_DE <- p_df$Tag %in% c("Up", "Down")
+  col_li <- c("white", "white")
+  names(col_li) <- c("*", "")
+  DE_label <- factor(is_DE, levels = c(TRUE, FALSE), labels = c("*", ""))
+  DE_label <- as.character(DE_label)
+  names(DE_label) <- p_df$Gid
+  ha <- rowAnnotation(
+    DE = anno_simple(
+      DE_label,
+      col = col_li,
+      pch = DE_label,
+      na_col = "white"),
+    show_annotation_name = FALSE,
+    width = unit(0.2, "cm")
+  )
+  
+  ht <- Heatmap(
+    norm_expr_mat,
+    name = "Scaled Expr.",
+    right_annotation = ha,
+    cluster_columns = FALSE,
+    row_names_gp = gpar(fontsize = 5),
+    column_names_gp = gpar(fontsize = 5),
+    row_dend_width = unit(5, "mm"),
+    column_dend_height = unit(5, "mm"),
+    column_title = sprintf("%s: %s", pathwayid, pathway),
+    column_title_gp = gpar(fontsize = 5),
+    heatmap_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 5),
+      grid_width = unit(2, "mm"),
+      grid_height = unit(2, "mm")
+    )
+  )
+  
+  inche_cm <- 2.54
+  pdf(
+    file.path(f_out, sprintf("%s.pdf", pathwayid)),
+    width = (3 + 0.3 * ncol(norm_expr_mat)) / inche_cm,
+    height = (1 + 0.2 * nrow(norm_expr_mat)) / inche_cm
+  )
+  print(ht)
+  dev.off()
+}
+
+for (proj in projs) {
+  cat(proj, "\n")
+  lapply(names(pwyli), function(pathwayid) {
+    cat(pathwayid, "\n")
+    showPathway(proj, pathwayid, pwyli[[pathwayid]])
+  })
+}
+```
+
+
+## View all DEGs in all pathways
+
+```{r}
+viewKeggDeg <- function(proj, pwyli) {
+  fDE <- file.path(proj, "DE.tsv")
+  stopifnot(file.exists(fDE))
+  f_out <- file.path(proj, "KEGG")
+  if (!dir.exists(f_out)) dir.create(f_out)
+  DE <- read_delim(fDE, "\t", escape_double = FALSE, trim_ws = TRUE)
+  head(DE)
+  
+  pathway_gene_li <- lapply(names(pwyli), function(pathwayid) {
+    p_df <- read_pathway_gene(pathwayid)
+    p_df <- inner_join(p_df, DE, by="Name")
+    return(p_df$Gid)
+  })
+  names(pathway_gene_li) <- names(pwyli)
+  
+  # Use Gid(ENSEMBL) to keep potential multiple Gids with same Name 
+  kegg_gene_df <- data.frame(Gid = unique(do.call(c, pathway_gene_li)))
+  kegg_gene_df <- inner_join(kegg_gene_df, DE)
+  kegg_gene_df
+
+  sample_indx <- grep("CPM-", names(kegg_gene_df))
+  expr_mat <- as.matrix(kegg_gene_df[, sample_indx])
+  rownames(expr_mat) <- kegg_gene_df$Name
+  colnames(expr_mat) <- sub("CPM-", "", colnames(expr_mat))
+  if (proj == "balf") {
+    expr_mat <- expr_mat[, c("Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")]
+  }
+  norm_expr_mat <- t(scale(t(expr_mat)))
+  head(norm_expr_mat)
+  
+  ha_data <- sapply(sort(names(pwyli)), function(p) { 
+    return(as.character(kegg_gene_df$Gid %in% pathway_gene_li[[p]]))
+  })
+
+  DE_indx <- kegg_gene_df$Tag %in% c("Up", "Down")
+  DE_label <- kegg_gene_df$Name[DE_indx]
+  DE_norm_expr_mat <- norm_expr_mat[DE_indx, ]
+  rownames(DE_norm_expr_mat) <- DE_label
+  DE_ha_data <- ha_data[DE_indx, ]
+  DE_ha_data <- DE_ha_data[, apply(DE_ha_data, 2, function(x) any(x=="TRUE"))]
+  rownames(DE_ha_data) <- DE_label
+  ht <- Heatmap(DE_norm_expr_mat, name="Scaled Expr.",
+                cluster_columns = FALSE,
+                row_names_gp = gpar(fontsize = 5),
+                column_names_gp = gpar(fontsize = 5),
+                row_dend_width = unit(5, "mm"),
+                column_dend_height = unit(5, "mm"),
+                column_title_gp = gpar(fontsize = 5),
+                width = 2,
+                heatmap_legend_param = list(
+                  labels_gp = gpar(fontsize = 5),
+                  title_gp = gpar(fontsize = 5),
+                  grid_width = unit(2, "mm"),
+                  grid_height = unit(2, "mm"))
+  )
+  ha <- Heatmap(DE_ha_data, name="KEGG pathway",
+                col=c("TRUE"="black", "FALSE"="white"),
+                row_names_gp = gpar(fontsize = 5),
+                column_names_gp = gpar(fontsize = 5),
+                row_dend_width = unit(5, "mm"),
+                column_dend_height = unit(5, "mm"),
+                column_title_gp = gpar(fontsize = 5),
+                width = 5,
+                heatmap_legend_param = list(
+                  labels_gp = gpar(fontsize = 5),
+                  title_gp = gpar(fontsize = 5),
+                  grid_width = unit(2, "mm"),
+                  grid_height = unit(2, "mm"))
+  )
+  
+  inche_cm <- 2.54
+  pdf(file.path(f_out, "DE.pathway.pdf"),
+      width=(3 + 1*ncol(DE_norm_expr_mat))/inche_cm, 
+      height=(1 + 0.2*nrow(DE_norm_expr_mat))/inche_cm)
+  print(ht + ha)
+  dev.off()
+}
+
+projs
+lapply(projs, function(proj) viewKeggDeg(proj, pwyli))
+```
+
+

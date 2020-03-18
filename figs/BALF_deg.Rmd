@@ -1,0 +1,236 @@
+---
+title: "BALF differential gene expression"
+output: html_notebook
+---
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(readr)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(DESeq2)
+library(DelayedArray)
+library(gridExtra)
+```
+
+# BALF data analysis
+
+As BALF samples sequencing was not deep enough, we used stringent cutoff to call differentially expressed genes.
+
+```{r}
+f_info <- "data/hg38_gencode.v32.info.tsv"
+f_cnt <- "data/balf.count.tsv"
+reads_cutoff <- 10
+fc_cutoff <- 4
+padj_cutoff <- 1e-10
+f_out <- "balf"
+if (!dir.exists(f_out)) dir.create(f_out)
+
+gene_df <- read_delim(f_info, "\t", escape_double = FALSE, trim_ws = TRUE)
+gene_info <- gene_df[, c("Gid", "GeneName")]
+gene_info <- gene_info[!duplicated(gene_info), ]
+names(gene_info) <- c("Gid", "Name")
+summary(gene_info)
+
+cnt_df <- read_delim(f_cnt, "\t", escape_double = FALSE, trim_ws = TRUE)
+summary(cnt_df)
+df <- data.frame(
+  Gid = cnt_df$Gid,
+  nCov1 = rowSums(cnt_df[, c("patient1.rep1", "patient1.rep2")]),
+  nCov2 = rowSums(cnt_df[, c("patient2.rep1", "patient2.rep2")]),
+  Ctrl1 = cnt_df$Ctrl.SRR10571724,
+  Ctrl2 = cnt_df$Ctrl.SRR10571730,
+  Ctrl3 = cnt_df$Ctrl.SRR10571732)
+summary(df)
+
+cnt <- df[, 2:ncol(df)]
+rownames(cnt) <- df$Gid
+cnt_mat <- as.matrix(cnt)
+expr_mat <- cnt_mat[apply(cnt_mat[, 1:2], 1, mean) > reads_cutoff, ]
+expr_cor <- cor(expr_mat, method = "spearman")
+expr_cor
+write.table(
+  format(expr_cor, digits = 4),
+  file.path(f_out, "Cor.SourceData.csv"),
+  row.names = FALSE,
+  col.names = TRUE,
+  quote = FALSE,
+  sep = "\t")
+
+### Correlation clustering
+ht <- Heatmap(
+  clustering_method_rows = "ward.D2",
+  clustering_method_columns = "ward.D2",
+  expr_cor,
+  name = "Expr. Cor.",
+  col = colorRamp2(c(0.5, 1), c("white", "#D7191C")),
+  row_names_gp = gpar(fontsize = 6),
+  column_names_gp = gpar(fontsize = 6),
+  row_dend_width = unit(5, "mm"),
+  column_dend_height = unit(5, "mm"),
+  show_row_dend = FALSE,
+  heatmap_legend_param = list(
+    labels_gp = gpar(fontsize = 6),
+    title_gp = gpar(fontsize = 6),
+    grid_width = unit(2, "mm"),
+    grid_height = unit(2, "mm")
+  )
+)
+inche_cm <- 2.54
+pdf(file.path(f_out, "Cor.ht.pdf"), width = 7/inche_cm, height = 6/inche_cm)
+print(ht)
+dev.off()
+
+### 
+ps <- list()
+for (j in 2:ncol(cnt_mat)) {
+  for (i in 1:(ncol(cnt_mat) - 1)) {
+    tmp_key <- paste(i, j)
+    if (i >= j) {
+      ps[[tmp_key]] <-
+        ggplot() + theme(panel.background = element_blank())
+    } else{
+      tmp_df <- data.frame(expr1 = cnt_mat[, i], expr2 = cnt_mat[, j])
+      p <- ggplot(tmp_df, aes(x = log10(expr1), y = log10(expr2))) +
+        geom_point(size = 0.1, color = "black") +
+        annotate(
+          "text",
+          x = 0.85 * log10(max(tmp_df$expr1)),
+          y = 0.15 * log10(max(tmp_df$expr2)),
+          label = sprintf("Cor = %.2f", expr_cor[i, j]),
+          size = 2
+        ) +
+        theme_bw() +
+        labs(
+          x = sprintf("Gene read counts in %s (log10)", colnames(cnt_mat)[i]),
+          y = sprintf("Gene read counts in %s (log10)", colnames(cnt_mat)[j])
+        ) +
+        theme(
+          axis.text = element_text(family = "ArialMT", color = "black", size = 6),
+          axis.title = element_text(family = "ArialMT", color = "black", size = 6),
+          panel.grid = element_blank(),
+        )
+      ps[[tmp_key]] <- p
+    }
+  }
+}
+
+plot_size <- ncol(cnt_mat) - 1
+inche_cm <- 2.54
+pdf(
+  file.path(f_out, "Cor.pdf"),
+  width = 4.8 * plot_size / inche_cm,
+  height = 4.8 * plot_size / inche_cm,
+  family = "ArialMT",
+  colormodel = "cmyk"
+)
+grid.arrange(
+  grobs = ps,
+  ncol = plot_size,
+  nrow = plot_size,
+  padding = unit(0, "mm")
+)
+dev.off()
+
+
+## DEG analysis
+all_cnt_mat <- as.matrix(cnt_df[, c(
+  "patient1.rep1",
+  "patient1.rep2",
+  "patient2.rep1",
+  "patient2.rep2",
+  "Ctrl.SRR10571724",
+  "Ctrl.SRR10571730",
+  "Ctrl.SRR10571732"
+)])
+rownames(all_cnt_mat) <- cnt_df$Gid
+condition <- factor(c(rep("nCoV", 4), rep("Ctrl", 3)), levels = c("Ctrl", "nCoV"))
+dds <- DESeqDataSetFromMatrix(all_cnt_mat, DataFrame(condition), ~ condition)
+dds <- DESeq(dds)
+res <- results(dds)
+res <- as.data.frame(res)
+res$Gid <- rownames(res)
+expr_res <- res[res$Gid %in% rownames(expr_mat), ]
+
+expr_res$Tag <- "NC"
+expr_res$Tag[expr_res$log2FoldChange > log2(fc_cutoff) & expr_res$padj < padj_cutoff] <- "Up"
+expr_res$Tag[expr_res$log2FoldChange < (-1 * log2(fc_cutoff)) & expr_res$padj < padj_cutoff] <- "Down"
+expr_res$Tag <- factor(expr_res$Tag, levels = c("Up", "NC", "Down"))
+
+col_li <- c("#cd2631", "#e9e9e9", "#4b79ae")
+names(col_li) <- c("Up", "NC", "Down")
+
+deseq2_info <- expr_res %>% group_by(Tag) %>% summarise(Num = n())
+deseq2_info$Text <- sprintf("N=%d", deseq2_info$Num)
+deseq2_info <- deseq2_info[which(deseq2_info$Tag != "NC"), ]
+deseq2_info
+deseq2_info$x <- -9 # for label text position
+deseq2_info$x[deseq2_info$Tag == "Up"] <- -deseq2_info$x[deseq2_info$Tag == "Up"]
+
+p <- ggplot(expr_res, aes(
+  x = log2FoldChange,
+  y = -log10(padj + 1e-50),
+  color = Tag
+)) +
+  geom_point(size = 0.3) +
+  geom_text(
+    aes(x = x, y = 40, label = Text),
+    data = deseq2_info,
+    size = 1.5,
+    color = "black"
+  ) +
+  labs(x = "Fold change of nCoV/ctrl (log2)", y = "Adjusted P-value") +
+  scale_y_continuous(
+    breaks = c(0, 25, 50),
+    labels = c(
+      expression("10" ^ "-0"),
+      expression("10" ^ "-25"),
+      expression("10" ^ "-50")
+    )
+  ) +
+  scale_color_manual(values = col_li) +
+  coord_cartesian(xlim = c(-13, 13), ylim = c(0, 50)) +
+  theme_bw() +
+  theme(
+    text = element_text(
+      family = "ArialMT",
+      color = "black",
+      size = 6
+    ),
+    axis.line = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    legend.background = element_blank(),
+    legend.title = element_blank(),
+    legend.key.size = unit(4, "mm"),
+    panel.grid = element_blank()
+  )
+
+ggsave(
+  file.path(f_out, "DE.pdf"),
+  p,
+  width = 7,
+  height = 4.5,
+  units = "cm"
+)
+
+res_df <- expr_res[, c("Gid", "baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj", "Tag")]
+norm_mat <- 1e6 * t(t(expr_mat) / colSums(expr_mat))
+norm_expr_df <- as.data.frame(norm_mat)
+norm_expr_df$Gid <- rownames(norm_mat)
+norm_expr_df <- right_join(gene_info, norm_expr_df)
+names(norm_expr_df) <- c("Gid", "Name", "CPM-nCoV1", "CPM-nCoV2", "CPM-Ctrl1", "CPM-Ctrl2", "CPM-Ctrl3")
+res_df <- right_join(norm_expr_df, res_df)
+res_df <- res_df %>% mutate_if(is.numeric, round, digits=4)
+head(res_df)
+write_tsv(res_df, file.path(f_out, "DE.tsv"))
+```
+
+
+
+
+
+
+

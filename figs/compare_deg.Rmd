@@ -1,0 +1,153 @@
+---
+title: "PBMC and BALF comparison analysis"
+output: html_notebook
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(DelayedArray)
+library(VennDiagram)
+library(RColorBrewer)
+library(ComplexHeatmap)
+```
+
+
+## Compare the DEG lists between PBMC and BALF
+
+```{r}
+balf_DE <- read_delim(file.path("balf", "DE.tsv"), "\t", escape_double = FALSE, trim_ws = TRUE)
+pbmc_DE <- read_delim(file.path("pbmc", "DE.tsv"), "\t", escape_double = FALSE, trim_ws = TRUE)
+f_out <- "degcmp"
+if (!dir.exists(f_out)) dir.create(f_out)
+
+DE_gene <- list(
+  "BALF Up" = balf_DE$Name[balf_DE$Tag == "Up"],
+  "BALF Down" = balf_DE$Name[balf_DE$Tag == "Down"],
+  "PBMC Up" = pbmc_DE$Name[pbmc_DE$Tag == "Up"],
+  "PBMC Down" = pbmc_DE$Name[pbmc_DE$Tag == "Down"]
+)
+
+# Plot the venn diagram
+venn.diagram(
+  DE_gene,
+  file.path(f_out, "DEG.intersect.venn.tiff"),
+  height = 450, width = 450, resolution = 150,
+  fill = brewer.pal(4, "Set1"),
+  cat.cex = 0.55
+)
+
+multi_size_df <- data.frame(Name=sort(unique(c(balf_DE$Name, pbmc_DE$Name))))
+multi_size_df$BalfUp <- multi_size_df$Name %in% DE_gene[["BALF Up"]]
+multi_size_df$BalfDown <- multi_size_df$Name %in% DE_gene[["BALF Down"]]
+multi_size_df$PbmcUp <- multi_size_df$Name %in% DE_gene[["PBMC Up"]]
+multi_size_df$PbmcDown <- multi_size_df$Name %in% DE_gene[["PBMC Down"]]
+multi_size_df <- multi_size_df[rowSums(multi_size_df[, 2:ncol(multi_size_df)]) > 1, ]
+multi_size_df
+write_tsv(multi_size_df, file.path(f_out, "DEG.intersect.SourceData.tsv"))
+
+balf_expr <- balf_DE[,c("Gid", "Name", "CPM-Ctrl1", "CPM-Ctrl2", "CPM-Ctrl3", "CPM-nCoV1", "CPM-nCoV2")] 
+names(balf_expr) <- c("Gid", "Name", "Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")
+pbmc_expr <- pbmc_DE[,c("Gid", "Name", "CPM-N1", "CPM-N2", "CPM-N3", "CPM-P1", "CPM-P2", "CPM-P3")]
+names(pbmc_expr) <- c("Gid", "Name", "N1", "N2", "N3", "P1", "P2", "P3")
+
+multi_size_df <- left_join(multi_size_df, balf_expr)
+multi_size_df <- left_join(multi_size_df, pbmc_expr)
+multi_size_df$Label <- ""
+multi_size_df$Label[multi_size_df$BalfUp & multi_size_df$PbmcUp] <- "B+ P+"
+multi_size_df$Label[multi_size_df$BalfUp & multi_size_df$PbmcDown] <- "B+ P-"
+multi_size_df$Label[multi_size_df$BalfDown & multi_size_df$PbmcUp] <- "B- P+"
+multi_size_df$Label[multi_size_df$BalfDown & multi_size_df$PbmcDown] <- "B- P-"
+
+balf_mat <- as.matrix(multi_size_df[,c("Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")])
+rownames(balf_mat) <- multi_size_df$Name
+
+pbmc_mat <- as.matrix(multi_size_df[,c("N1", "N2", "N3", "P1", "P2", "P3")])
+rownames(pbmc_mat) <- multi_size_df$Name
+
+scaled_balf_mat <- t(scale(t(balf_mat)))
+scaled_pbmc_mat <- t(scale(t(pbmc_mat)))
+
+merge_mat <- cbind(scaled_balf_mat, scaled_pbmc_mat)
+
+ht <- Heatmap(merge_mat, name="Scaled Expr.",
+              row_split = multi_size_df$Label,
+              column_split = c(rep("BALF", ncol(scaled_balf_mat)), rep("PBMC", ncol(scaled_pbmc_mat))),
+              cluster_columns = FALSE,
+              row_names_gp = gpar(fontsize = 5),
+              column_names_gp = gpar(fontsize = 5),
+              row_dend_width = unit(5, "mm"),
+              column_dend_height = unit(5, "mm"),
+              column_title_gp = gpar(fontsize = 5),
+              row_title_gp = gpar(fontsize = 5),
+              heatmap_legend_param = list(
+                labels_gp = gpar(fontsize = 5),
+                title_gp = gpar(fontsize = 5),
+                grid_width = unit(2, "mm"),
+                grid_height = unit(2, "mm"))
+)
+
+print(ht)
+inche_cm <- 2.54
+pdf(file.path(f_out, "DEG.intersect.heatmap.pdf"), width=10/inche_cm, height=15/inche_cm)
+print(ht)
+dev.off()
+
+
+# Show the cross table 
+overlap_cnt_mat <- matrix(0, nrow = 2, ncol = 2)
+regs <- c("Up", "Down")
+for (i in 1:2) {
+  for (j in 1:2) {
+    overlap_cnt_mat[i, j] <- length(intersect(DE_gene[[paste("BALF", regs[i])]], DE_gene[[paste("PBMC", regs[j])]]))
+  }
+}
+rownames(overlap_cnt_mat) <- c("BALF Up", "BALF Down")
+colnames(overlap_cnt_mat) <- c("PBMC Up", "PBMC Down")
+overlap_cnt_mat
+
+
+# Show DEG heatmap, add figure to pbmc/balf
+
+plot_DEG_ht <- function(df, proj) {
+  DE <- df[df$Tag %in% c("Up", "Down"), ]
+  sample_indx <- grep("CPM-", names(DE))
+  expr_mat <- as.matrix(DE[, sample_indx])
+  rownames(expr_mat) <- DE$Name
+  colnames(expr_mat) <- sub("CPM-", "", colnames(expr_mat))
+  if (proj == "balf") {
+    expr_mat <- expr_mat[, c("Ctrl1", "Ctrl2", "Ctrl3", "nCoV1", "nCoV2")]
+  }
+  norm_expr_mat <- t(scale(t(expr_mat)))
+  ht <- Heatmap(
+    norm_expr_mat,
+    name = "Scaled Expr.",
+    cluster_columns = FALSE,
+    row_names_gp = gpar(fontsize = 5),
+    column_names_gp = gpar(fontsize = 5),
+    row_dend_width = unit(5, "mm"),
+    column_dend_height = unit(5, "mm"),
+    column_title_gp = gpar(fontsize = 5),
+    show_row_names = FALSE,
+    heatmap_legend_param = list(
+      labels_gp = gpar(fontsize = 5),
+      title_gp = gpar(fontsize = 5),
+      grid_width = unit(2, "mm"),
+      grid_height = unit(2, "mm")
+    )
+  )
+  return(ht)
+}
+
+inche_cm <- 2.54
+deli <- list(balf = balf_DE, pbmc = pbmc_DE)
+lapply(names(deli), function(proj) {
+  if (!dir.exists(proj)) dir.create(proj)
+  pdf(file.path(proj, "DEG_ht.pdf"), width=7/inche_cm, height=4.8/inche_cm)
+  ht <- plot_DEG_ht(deli[[proj]], proj)
+  print(ht)
+  dev.off()
+})
+```
+
